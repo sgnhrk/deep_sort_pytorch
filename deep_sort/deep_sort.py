@@ -6,6 +6,7 @@ from .sort.nn_matching import NearestNeighborDistanceMetric
 from .sort.preprocessing import non_max_suppression
 from .sort.detection import Detection
 from .sort.tracker import Tracker
+from .sort.iou_matching import iou as calc_iou
 
 
 __all__ = ['DeepSort']
@@ -23,7 +24,7 @@ class DeepSort(object):
         metric = NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
         self.tracker = Tracker(metric, max_iou_distance=max_iou_distance, max_age=max_age, n_init=n_init)
 
-    def update(self, bbox_xywh, confidences, ori_img):
+    def update(self, bbox_xywh, confidences, ori_img, bbox_xywh_of_all_classes=None):
         self.height, self.width = ori_img.shape[:2]
         # generate detections
         features = self._get_features(bbox_xywh, ori_img)
@@ -35,6 +36,17 @@ class DeepSort(object):
         scores = np.array([d.confidence for d in detections])
         indices = non_max_suppression(boxes, self.nms_max_overlap, scores)
         detections = [detections[i] for i in indices]
+
+        # add occuluded flag if iou(obj1, any_objs) > 0 and obj1.ymax < any_objs.ymax
+        if bbox_xywh_of_all_classes is not None:
+            bbox_tlwh_of_all_classes = self._xywh_to_tlwh(bbox_xywh_of_all_classes)
+            bbox_ymax_of_all_classes = bbox_xywh_of_all_classes[:,1] + bbox_xywh_of_all_classes[:,3]/2
+            for d in detections:
+                tlwh = d.to_tlwh()
+                d_ymax = tlwh[1] + tlwh[3]
+                iou = calc_iou(tlwh, bbox_tlwh_of_all_classes)
+                m = (0 < iou) & (iou < 1) & (d_ymax < bbox_ymax_of_all_classes)
+                d.occuluded = m.any()
 
         # update tracker
         self.tracker.predict()
@@ -48,7 +60,9 @@ class DeepSort(object):
             box = track.to_tlwh()
             x1,y1,x2,y2 = self._tlwh_to_xyxy(box)
             track_id = track.track_id
-            outputs.append(np.array([x1,y1,x2,y2,track_id], dtype=np.int))
+            conf = track.confidence
+            age = track.age
+            outputs.append(np.array([x1,y1,x2,y2,age,track_id,conf], dtype=np.float))
         if len(outputs) > 0:
             outputs = np.stack(outputs,axis=0)
         return outputs
@@ -99,7 +113,7 @@ class DeepSort(object):
         w = int(x2-x1)
         h = int(y2-y1)
         return t,l,w,h
-    
+
     def _get_features(self, bbox_xywh, ori_img):
         im_crops = []
         for box in bbox_xywh:
@@ -111,5 +125,3 @@ class DeepSort(object):
         else:
             features = np.array([])
         return features
-
-

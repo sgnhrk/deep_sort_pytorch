@@ -1,5 +1,5 @@
 # vim: expandtab:ts=4:sw=4
-
+import numpy as np
 
 class TrackState:
     """
@@ -70,7 +70,7 @@ class Track:
     """
 
     def __init__(self, mean, covariance, track_id, n_init, max_age,
-                 feature=None, static_thresh=0.1, static_set_frames=0):
+                 feature=None, static_thresh=0.1, static_set_frames=0, occuluded=False):
         self.mean = mean
         self.covariance = covariance
         self.track_id = track_id
@@ -84,19 +84,19 @@ class Track:
             self.features.append(feature)
 
         self.static = False
-        self.partially_occuluded = False
+        self.partially_occuluded = occuluded
         self.static_count = 0
         self.xyah_in_prev_frame = None
 
         self._n_init = n_init
         self._max_age = max_age
-        self._static_thresh = _static_thresh
+        self._static_thresh = static_thresh
         self._static_set_frames = static_set_frames
 
     def to_xyah(self):
         '''Get current position in bounding box format (bbox center x, center y, aspect, height)
         '''
-        return mean[:4].copy()
+        return self.mean[:4].copy()
 
     def to_tlwh(self):
         """Get current position in bounding box format `(top left x, top left y,
@@ -156,11 +156,12 @@ class Track:
         self.mean, self.covariance = kf.update(
             self.mean, self.covariance, detection.to_xyah())
         self.features.append(detection.feature)
+        self.partially_occuluded = detection.occuluded
 
         xyah = self.to_xyah()
         if self.xyah_in_prev_frame is not None:
             d = np.sum( (xyah[:2] - self.xyah_in_prev_frame[:2])**2 )
-            if d < (xyah[3] * self.static_thresh)**2:
+            if d < (xyah[3] * self._static_thresh)**2:
                 self.static_count += 1
             else:
                 self.static_count = 0
@@ -174,7 +175,7 @@ class Track:
         self.time_since_update = 0
         if self.state == TrackState.Tentative and self.hits >= self._n_init:
             self.state = TrackState.Confirmed
-        elif self.state == FullyOcculuded:
+        elif self.state == TrackState.FullyOcculuded:
             self.state = TrackState.Confirmed
 
     def mark_missed(self):
@@ -186,9 +187,6 @@ class Track:
             self.state = TrackState.FullyOcculuded
         elif self.time_since_update > self._max_age:
             self.state = TrackState.Deleted
-
-    def mark_occuluded(self, flag=True):
-        self.partially_occuluded = flag
 
     def is_tentative(self):
         """Returns True if this track is tentative (unconfirmed).

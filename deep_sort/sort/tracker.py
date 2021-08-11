@@ -37,7 +37,8 @@ class Tracker:
 
     """
 
-    def __init__(self, metric, max_iou_distance=0.7, max_age=70, n_init=3):
+    def __init__(self, metric, max_iou_distance=0.7, max_age=70, n_init=3,
+                 static_thresh=0.1, static_set_frames=0, static_iou_match_thresh=0.8):
         self.metric = metric
         self.max_iou_distance = max_iou_distance
         self.max_age = max_age
@@ -46,6 +47,9 @@ class Tracker:
         self.kf = kalman_filter.KalmanFilter()
         self.tracks = []
         self._next_id = 1
+        self._static_thresh = static_thresh
+        self._static_set_frames = static_set_frames
+        self._static_iou_match_thresh = static_iou_match_thresh
 
     def predict(self):
         """Propagate track state distributions one time step forward.
@@ -72,6 +76,7 @@ class Tracker:
         for track_idx, detection_idx in matches:
             self.tracks[track_idx].update(
                 self.kf, detections[detection_idx])
+            self.tracks[track_idx].confidence = detections[detection_idx].confidence
         for track_idx in unmatched_tracks:
             self.tracks[track_idx].mark_missed()
         for detection_idx in unmatched_detections:
@@ -79,7 +84,7 @@ class Tracker:
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
         # Update distance metric.
-        active_targets = [t.track_id for t in self.tracks if t.is_confirmed()]
+        active_targets = [t.track_id for t in self.tracks if t.is_confirmed() or t.is_fully_occuluded()]
         features, targets = [], []
         for track in self.tracks:
             if not track.is_confirmed():
@@ -105,8 +110,10 @@ class Tracker:
         # Split track set into confirmed and unconfirmed tracks.
         confirmed_tracks = [
             i for i, t in enumerate(self.tracks) if t.is_confirmed()]
+        fully_occuluded_tracks = [
+            i for i, t in enumerate(self.tracks) if t.is_fully_occuluded()]
         unconfirmed_tracks = [
-            i for i, t in enumerate(self.tracks) if not t.is_confirmed()]
+            i for i, t in enumerate(self.tracks) if not t.is_confirmed() and not t.is_fully_occuluded()]
 
         # Associate confirmed tracks using appearance features.
         matches_a, unmatched_tracks_a, unmatched_detections = \
@@ -130,9 +137,15 @@ class Tracker:
         unmatched_tracks = list(set(unmatched_tracks_a + unmatched_tracks_b))
         return matches, unmatched_tracks, unmatched_detections
 
+    def _match_static_track(self, detections, fully_occuluded_tracks, unmatched_detections, iou_thresh):
+
+        for detection_idx in unmatched_detections:
+            detection = detections[detection_idx]
+
     def _initiate_track(self, detection):
         mean, covariance = self.kf.initiate(detection.to_xyah())
         self.tracks.append(Track(
             mean, covariance, self._next_id, self.n_init, self.max_age,
-            detection.feature))
+            detection.feature, self._static_thresh, self._static_set_frames, detection.occuluded))
+        self.tracks[-1].confidence = detection.confidence
         self._next_id += 1

@@ -4,7 +4,7 @@ import numpy as np
 from . import linear_assignment
 
 
-def iou(bbox, candidates):
+def iou(bbox, candidates, denom='sum'):
     """Computer intersection over union.
 
     Parameters
@@ -14,6 +14,11 @@ def iou(bbox, candidates):
     candidates : ndarray
         A matrix of candidate bounding boxes (one per row) in the same format
         as `bbox`.
+    denom : str
+        iou を計算するときの分母を何にするか．
+        'sum': bbox と candidate の和集合の面積
+        'candidate': candidate の面積
+        'bbox': bbox の面積
 
     Returns
     -------
@@ -36,8 +41,14 @@ def iou(bbox, candidates):
     area_intersection = wh.prod(axis=1)
     area_bbox = bbox[2:].prod()
     area_candidates = candidates[:, 2:].prod(axis=1)
-    return area_intersection / (area_bbox + area_candidates - area_intersection)
-
+    if denom == 'sum':
+        return area_intersection / (area_bbox + area_candidates - area_intersection)
+    elif denom == 'candidate':
+        return area_intersection / area_candidates
+    elif denom == 'bbox':
+        return area_intersection / area_bbox
+    else:
+        raise ValueError(f'Unknown denom value: {denom}')
 
 def iou_cost(tracks, detections, track_indices=None,
              detection_indices=None):
