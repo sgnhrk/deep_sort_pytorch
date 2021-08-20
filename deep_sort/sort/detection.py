@@ -30,7 +30,7 @@ class Detection(object):
         self.tlwh = np.asarray(tlwh, dtype=np.float)
         self.confidence = float(confidence)
         self.feature = np.asarray(feature, dtype=np.float32)
-        self.occuluded = False
+        self.occluded = False
 
     def to_tlwh(self):
         return self.tlwh.copy()

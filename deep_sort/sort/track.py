@@ -8,15 +8,15 @@ class TrackState:
     the track state is changed to `confirmed`. Tracks that are no longer alive
     are classified as `deleted` to mark them for removal from the set of active
     tracks.
-    FullyOcculuded は画面から消えて検出結果がなくなった状態だが，トラッキングとしては
-    継続状態にしたい状態のこと．_partially_occuluded = true かつ static = true の状態で，
+    Fullyoccluded は画面から消えて検出結果がなくなった状態だが，トラッキングとしては
+    継続状態にしたい状態のこと．_partially_occluded = true かつ static = true の状態で，
     missed を実行されるとこの状態に入る．
     """
 
     Tentative = 1
     Confirmed = 2
     Deleted = 3
-    FullyOcculuded = 4
+    Fullyoccluded = 4
 
 
 class Track:
@@ -65,12 +65,12 @@ class Track:
         vector is added to this list.
     static_thresh : float
     static_set_frames : int
-        bbox の中心座標の変動が height * static_thresh 以下であり，それが static_set_frames 続いたら
+        bbox の下端中点の変動が static_thresh 以下であり，それが static_set_frames 続いたら
         その track に static フラグを付ける．static_set_frames が 0 の場合，static フラグは付けない．
     """
 
     def __init__(self, mean, covariance, track_id, n_init, max_age,
-                 feature=None, static_thresh=0.1, static_set_frames=0, occuluded=False):
+                 feature=None, static_thresh=5.0, static_set_frames=0, static_unset_frames=10, occluded=False, max_age_fully_occluded=0):
         self.mean = mean
         self.covariance = covariance
         self.track_id = track_id
@@ -84,14 +84,20 @@ class Track:
             self.features.append(feature)
 
         self.static = False
-        self.partially_occuluded = occuluded
+        self.partially_occluded = occluded
         self.static_count = 0
-        self.xyah_in_prev_frame = None
+        self.static_unset_count = 0
+        self.tlbr_in_prev_frame = None
 
+        self._static_tlwh = None
         self._n_init = n_init
         self._max_age = max_age
         self._static_thresh = static_thresh
         self._static_set_frames = static_set_frames
+        self._static_unset_frames = static_unset_frames
+        self._max_age_fully_occluded = max_age_fully_occluded
+
+        #self._d_hist = np.zeros(10, dtype=np.float32)
 
     def to_xyah(self):
         '''Get current position in bounding box format (bbox center x, center y, aspect, height)
@@ -137,9 +143,10 @@ class Track:
             The Kalman filter.
 
         """
-        self.mean, self.covariance = kf.predict(self.mean, self.covariance)
-        self.age += 1
+        if self.state != TrackState.Fullyoccluded:
+            self.mean, self.covariance = kf.predict(self.mean, self.covariance)
         self.time_since_update += 1
+        self.age += 1
 
     def update(self, kf, detection):
         """Perform Kalman filter measurement update step and update the feature
@@ -153,29 +160,50 @@ class Track:
             The associated detection.
 
         """
+
+        if self.static and not self.partially_occluded and detection.occluded:
+            self._static_tlwh = self.to_tlwh()
+
         self.mean, self.covariance = kf.update(
             self.mean, self.covariance, detection.to_xyah())
         self.features.append(detection.feature)
-        self.partially_occuluded = detection.occuluded
+        self.partially_occluded = detection.occluded
 
-        xyah = self.to_xyah()
-        if self.xyah_in_prev_frame is not None:
-            d = np.sum( (xyah[:2] - self.xyah_in_prev_frame[:2])**2 )
-            if d < (xyah[3] * self._static_thresh)**2:
-                self.static_count += 1
+        # static object の判定
+        if self._static_set_frames > 0:
+
+            tlbr = self.to_tlbr()
+            if self.tlbr_in_prev_frame is not None:
+                x = (tlbr[0] + tlbr[2]) / 2
+                y = tlbr[3]
+                px = (self.tlbr_in_prev_frame[0] + self.tlbr_in_prev_frame[2]) / 2
+                py = self.tlbr_in_prev_frame[3]
+                d = np.sum( (x-px)**2 + (y-py)**2 )
+                d = np.sqrt(d)
+                thresh = self._static_thresh
+                #print(self.track_id, x, y, px, py, d, thresh)
+                if d < thresh:
+                    self.static_count = min(self.static_count + 1, self._static_set_frames)
+                    self.static_unset_count = 0
+                elif self.partially_occluded == False:
+                    self.static_count = 0
+                    self.static_unset_count = min(self.static_unset_count + 1, self._static_unset_frames)
+
+            self.tlbr_in_prev_frame = tlbr
+
+            if self.static == False:
+                if (self.static_count == self._static_set_frames):
+                    self.static = True
             else:
-                self.static_count = 0
-
-        self.xyah_in_prev_frame = xyah
-
-        if self._static_set_frames > 0 and self.static_count > self._static_set_frames:
-            self.static = True
+                if self.partially_occluded == False and self.static_count == 0:
+                    if (self.static_unset_count == self._static_unset_frames):
+                        self.static = False
 
         self.hits += 1
         self.time_since_update = 0
         if self.state == TrackState.Tentative and self.hits >= self._n_init:
             self.state = TrackState.Confirmed
-        elif self.state == TrackState.FullyOcculuded:
+        elif self.state == TrackState.Fullyoccluded:
             self.state = TrackState.Confirmed
 
     def mark_missed(self):
@@ -183,8 +211,11 @@ class Track:
         """
         if self.state == TrackState.Tentative:
             self.state = TrackState.Deleted
-        elif self.partially_occuluded and self.static and self.state == TrackState.Confirmed:
-            self.state = TrackState.FullyOcculuded
+        elif self.partially_occluded and self.static and self.state == TrackState.Confirmed:
+            self.state = TrackState.Fullyoccluded
+        elif self.state == TrackState.Fullyoccluded:
+            if self.time_since_update > self._max_age_fully_occluded:
+                self.state = TrackState.Deleted
         elif self.time_since_update > self._max_age:
             self.state = TrackState.Deleted
 
@@ -204,11 +235,22 @@ class Track:
     def is_static(self):
         return self.static
 
-    def is_fully_occuluded(self):
-        return self.state == TrackState.FullyOcculuded
+    def is_fully_occluded(self):
+        return self.state == TrackState.Fullyoccluded
 
-    def is_static_and_fully_occuluded(self):
-        return self.is_static() and self.is_fully_occuluded()
+    def is_static_and_fully_occluded(self):
+        return self.is_static() and self.is_fully_occluded()
 
-    def is_partially_occuluded(self):
-        return self.partially_occuluded and not self.is_fully_occuluded()
+    def is_partially_occluded(self):
+        return self.partially_occluded and not self.is_fully_occluded()
+
+    def to_static_tlwh(self):
+        if self._static_tlwh is None:
+            return self.to_tlwh()
+        else:
+            return self._static_tlwh
+
+    def __str__(self):
+        s = f'state={self.state} id={self.track_id:4d} age={self.age:5d} tsu={self.time_since_update} '
+        s += f'tlbr={np.array(self.to_tlbr(), dtype=np.int)} static={self.static} stc={self.static_count},{self.static_unset_count} occ={self.partially_occluded}'
+        return s

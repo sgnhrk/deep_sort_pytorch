@@ -38,7 +38,8 @@ class Tracker:
     """
 
     def __init__(self, metric, max_iou_distance=0.7, max_age=70, n_init=3,
-                 static_thresh=0.1, static_set_frames=0, static_iou_match_thresh=0.8):
+                 static_thresh=5.0, static_set_frames=0, static_unset_frames=10, static_iou_match_thresh=0.8,
+                 max_age_fully_occluded=700):
         self.metric = metric
         self.max_iou_distance = max_iou_distance
         self.max_age = max_age
@@ -49,7 +50,9 @@ class Tracker:
         self._next_id = 1
         self._static_thresh = static_thresh
         self._static_set_frames = static_set_frames
+        self._static_unset_frames = static_unset_frames
         self._static_iou_match_thresh = static_iou_match_thresh
+        self._max_age_fully_occluded = max_age_fully_occluded
 
     def predict(self):
         """Propagate track state distributions one time step forward.
@@ -84,7 +87,7 @@ class Tracker:
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
         # Update distance metric.
-        active_targets = [t.track_id for t in self.tracks if t.is_confirmed() or t.is_fully_occuluded()]
+        active_targets = [t.track_id for t in self.tracks if t.is_confirmed() or t.is_fully_occluded()]
         features, targets = [], []
         for track in self.tracks:
             if not track.is_confirmed():
@@ -110,10 +113,10 @@ class Tracker:
         # Split track set into confirmed and unconfirmed tracks.
         confirmed_tracks = [
             i for i, t in enumerate(self.tracks) if t.is_confirmed()]
-        fully_occuluded_tracks = [
-            i for i, t in enumerate(self.tracks) if t.is_fully_occuluded()]
+        fully_occluded_tracks = [
+            i for i, t in enumerate(self.tracks) if t.is_fully_occluded()]
         unconfirmed_tracks = [
-            i for i, t in enumerate(self.tracks) if not t.is_confirmed() and not t.is_fully_occuluded()]
+            i for i, t in enumerate(self.tracks) if not t.is_confirmed() and not t.is_fully_occluded()]
 
         # Associate confirmed tracks using appearance features.
         matches_a, unmatched_tracks_a, unmatched_detections = \
@@ -133,19 +136,49 @@ class Tracker:
                 iou_matching.iou_cost, self.max_iou_distance, self.tracks,
                 detections, iou_track_candidates, unmatched_detections)
 
-        matches = matches_a + matches_b
-        unmatched_tracks = list(set(unmatched_tracks_a + unmatched_tracks_b))
+        matches_c, unmatched_tracks_c, unmatched_detections = self._match_static_track(detections, fully_occluded_tracks, unmatched_detections)
+
+        matches = matches_a + matches_b + matches_c
+        unmatched_tracks = list(set(unmatched_tracks_a + unmatched_tracks_b + unmatched_tracks_c))
+
         return matches, unmatched_tracks, unmatched_detections
 
-    def _match_static_track(self, detections, fully_occuluded_tracks, unmatched_detections, iou_thresh):
+    def _match_static_track(self, detections, fully_occluded_tracks, unmatched_detections):
 
-        for detection_idx in unmatched_detections:
-            detection = detections[detection_idx]
+        from .iou_matching import iou as calc_iou
+
+        #print(detections, fully_occluded_tracks, unmatched_detections)
+
+        matches = []
+        for det_idx in unmatched_detections:
+            for track_idx in fully_occluded_tracks:
+                det = detections[det_idx]
+                trk = self.tracks[track_idx]
+                det_tlwh = det.to_tlwh()
+                trk_tlwh = trk.to_static_tlwh()
+                iou = calc_iou(det_tlwh, trk_tlwh[np.newaxis,...], 'bbox')
+                if iou > self._static_iou_match_thresh:
+                    matches.append((track_idx, det_idx))
+                    break
+                #print(det_idx, track_idx, det_tlwh, trk_tlwh, iou)
+
+        unmatched_tracks = [i for i in fully_occluded_tracks if i not in [m[0] for m in matches]]
+        unmatched_detections = [i for i in unmatched_detections if i not in [m[1] for m in matches]]
+
+        return matches, unmatched_tracks, unmatched_detections
+
 
     def _initiate_track(self, detection):
         mean, covariance = self.kf.initiate(detection.to_xyah())
         self.tracks.append(Track(
             mean, covariance, self._next_id, self.n_init, self.max_age,
-            detection.feature, self._static_thresh, self._static_set_frames, detection.occuluded))
+            detection.feature, self._static_thresh, self._static_set_frames, self._static_unset_frames,
+            detection.occluded, self._max_age_fully_occluded))
         self.tracks[-1].confidence = detection.confidence
         self._next_id += 1
+
+    def __str__(self):
+        s = []
+        for track in self.tracks:
+            s.append(str(track))
+        return '\n'.join(s)
