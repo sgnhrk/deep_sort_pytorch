@@ -13,9 +13,10 @@ __all__ = ['DeepSort']
 
 
 class DeepSort(object):
-    def __init__(self, model_path, max_dist=0.2, min_confidence=0.3, nms_max_overlap=1.0, max_iou_distance=0.7, max_age=70, n_init=3, nn_budget=100, use_cuda=True,
-                 static_thresh=5.0, static_set_frames=0, static_unset_frames=10, static_iou_match_thresh=0.8, max_age_fully_occluded=700):
-        self.min_confidence = min_confidence
+    def __init__(self, model_path, max_dist=0.2, min_init_confidence=0.3, min_cont_confidence=0.3, nms_max_overlap=1.0, max_iou_distance=0.7, max_age=70, n_init=3, nn_budget=100, use_cuda=True,
+                 static_thresh=5.0, static_set_frames=0, static_unset_frames=10, static_iou_match_thresh=0.8, max_age_fully_occluded=700, only_position=False):
+
+        self.min_cont_confidence = min_cont_confidence
         self.nms_max_overlap = nms_max_overlap
 
         self.extractor = Extractor(model_path, use_cuda=use_cuda)
@@ -23,23 +24,25 @@ class DeepSort(object):
         max_cosine_distance = max_dist
         nn_budget = 100
         metric = NearestNeighborDistanceMetric("cosine", max_cosine_distance, nn_budget)
-        self.tracker = Tracker(metric, max_iou_distance=max_iou_distance, max_age=max_age, n_init=n_init,
+        self.tracker = Tracker(metric, min_init_confidence=min_init_confidence,
+                               max_iou_distance=max_iou_distance, max_age=max_age, n_init=n_init,
                                static_thresh=static_thresh, static_set_frames=static_set_frames,
                                static_unset_frames=static_unset_frames, static_iou_match_thresh=static_iou_match_thresh,
-                               max_age_fully_occluded=max_age_fully_occluded)
+                               max_age_fully_occluded=max_age_fully_occluded, only_position=only_position)
 
     def update(self, bbox_xywh, confidences, ori_img, bbox_xywh_of_all_classes=None):
         self.height, self.width = ori_img.shape[:2]
         # generate detections
         features = self._get_features(bbox_xywh, ori_img)
         bbox_tlwh = self._xywh_to_tlwh(bbox_xywh)
-        detections = [Detection(bbox_tlwh[i], conf, features[i]) for i,conf in enumerate(confidences) if conf>self.min_confidence]
+        detections = [Detection(bbox_tlwh[i], conf, features[i]) for i,conf in enumerate(confidences) if conf>self.min_cont_confidence]
 
         # run on non-maximum supression
-        boxes = np.array([d.tlwh for d in detections])
-        scores = np.array([d.confidence for d in detections])
-        indices = non_max_suppression(boxes, self.nms_max_overlap, scores)
-        detections = [detections[i] for i in indices]
+        if self.nms_max_overlap >= 0:
+            boxes = np.array([d.tlwh for d in detections])
+            scores = np.array([d.confidence for d in detections])
+            indices = non_max_suppression(boxes, self.nms_max_overlap, scores)
+            detections = [detections[i] for i in indices]
 
         # add occluded flag if iou(obj1, any_objs) > 0 and obj1.ymax < any_objs.ymax
         if bbox_xywh_of_all_classes is not None:

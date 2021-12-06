@@ -37,10 +37,11 @@ class Tracker:
 
     """
 
-    def __init__(self, metric, max_iou_distance=0.7, max_age=70, n_init=3,
+    def __init__(self, metric, min_init_confidence=0.3, max_iou_distance=0.7, max_age=70, n_init=3,
                  static_thresh=5.0, static_set_frames=0, static_unset_frames=10, static_iou_match_thresh=0.8,
-                 max_age_fully_occluded=700):
+                 max_age_fully_occluded=700, only_position=False):
         self.metric = metric
+        self.min_init_confidence = min_init_confidence
         self.max_iou_distance = max_iou_distance
         self.max_age = max_age
         self.n_init = n_init
@@ -53,6 +54,7 @@ class Tracker:
         self._static_unset_frames = static_unset_frames
         self._static_iou_match_thresh = static_iou_match_thresh
         self._max_age_fully_occluded = max_age_fully_occluded
+        self._only_position = only_position
 
     def predict(self):
         """Propagate track state distributions one time step forward.
@@ -83,7 +85,8 @@ class Tracker:
         for track_idx in unmatched_tracks:
             self.tracks[track_idx].mark_missed()
         for detection_idx in unmatched_detections:
-            self._initiate_track(detections[detection_idx])
+            if detections[detection_idx].confidence > self.min_init_confidence:
+                self._initiate_track(detections[detection_idx])
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
         # Update distance metric.
@@ -106,7 +109,7 @@ class Tracker:
             cost_matrix = self.metric.distance(features, targets)
             cost_matrix = linear_assignment.gate_cost_matrix(
                 self.kf, cost_matrix, tracks, dets, track_indices,
-                detection_indices)
+                detection_indices, only_position=self._only_position)
 
             return cost_matrix
 
