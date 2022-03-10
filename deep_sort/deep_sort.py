@@ -71,8 +71,9 @@ class DeepSort(object):
             track_id = track.track_id
             conf = track.confidence
             age = track.age
-            static = 0 if track.static is False else 1
-            outputs.append(np.array([x1,y1,x2,y2,static,age,track_id,conf], dtype=np.float))
+            static = 1 if track.is_static() else 0
+            occuluded = 1 if track.is_partially_occluded() else 0
+            outputs.append(np.array([x1,y1,x2,y2,occuluded,static,age,track_id,conf], dtype=np.float))
         if len(outputs) > 0:
             outputs = np.stack(outputs,axis=0)
         return outputs
